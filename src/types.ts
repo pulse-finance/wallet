@@ -1,4 +1,4 @@
-export type AppTab = "wallets" | "dapps" | "settings";
+export type AppTab = "wallets" | "settings";
 
 export type MidnightNetwork = "preprod" | "mainnet";
 
@@ -19,7 +19,6 @@ export type AppConfig = {
   network: MidnightNetwork;
   endpoints: NetworkEndpoints;
   wallets: WalletConfig[];
-  connectedWalletId: string | null;
 };
 
 export type NetworkEndpoints = {

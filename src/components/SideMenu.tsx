@@ -1,13 +1,12 @@
+import { Plus, Settings as SettingsIcon, Wallet } from "lucide-react";
 import { AppTab, WalletConfig } from "../types";
 
 type SideMenuProps = {
   activeTab: AppTab;
   wallets: WalletConfig[];
   selectedWalletId: string | null;
-  connectedWalletId: string | null;
-  onSelectWallets: () => void;
+  onAddWallet: () => void;
   onSelectWallet: (walletId: string) => void;
-  onSelectDapps: () => void;
   onSelectSettings: () => void;
 };
 
@@ -15,43 +14,57 @@ export function SideMenu({
   activeTab,
   wallets,
   selectedWalletId,
-  connectedWalletId,
-  onSelectWallets,
+  onAddWallet,
   onSelectWallet,
-  onSelectDapps,
   onSelectSettings,
 }: SideMenuProps) {
   return (
     <aside className="side-menu">
       <div className="brand">
-        <span className="brand-mark">P</span>
-        <span>Pulse Wallet</span>
+        <svg
+          className="brand-logo"
+          viewBox="0 0 4190 900"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+          role="img"
+          aria-label="Pulse Wallet"
+        >
+          <path d="M877.865 263.642C878.582 410.507 754.119 530.149 600.824 530.149H483.703C482.092 530.149 480.301 530.149 478.689 530.149C477.077 530.149 475.287 530.149 473.675 530.149C429.979 531.761 392.371 555.761 372.672 590.328C370.881 593.373 369.448 596.418 368.016 599.642L215.974 900V465.313C215.974 393.672 276.683 335.642 351.54 335.642H599.033C639.148 335.642 673.173 305.552 674.248 267.224C675.501 227.463 642.013 194.687 600.645 194.687H274.534C209.706 194.687 147.923 167.284 106.017 120L0 0H597.6C750.537 0 876.97 117.313 877.865 263.642Z" fill="white" />
+          <path d="M1240.49 743.259V187.856H1449.12C1489.06 187.856 1524.52 194.841 1555.5 208.632C1586.48 222.423 1610.66 242.483 1628.21 268.811C1645.76 294.96 1654.53 326.483 1654.53 363.199C1654.53 399.916 1646.47 432.513 1630.18 458.483C1613.88 484.453 1590.24 504.154 1559.44 517.587C1528.46 531.02 1491.03 537.826 1446.8 537.826H1344V743.259H1240.49ZM1344 450.065H1446.26C1479.39 450.065 1505 443.259 1523.44 429.468C1541.89 415.677 1551.02 394.363 1551.02 365.169C1551.02 335.975 1541.53 314.483 1522.73 299.796C1503.74 284.931 1478.67 277.587 1447.15 277.587H1344V450.244V450.065Z" fill="white" />
+          <path d="M2109.93 755.08C2059.61 755.08 2017.52 744.871 1983.68 724.453C1949.65 704.035 1924.04 676.453 1906.85 641.349C1889.66 606.244 1881.06 566.662 1881.06 522.602V187.856H1984.21V523.856C1984.21 568.811 1995.5 602.483 2017.88 624.692C2040.27 646.901 2071.07 658.005 2109.93 658.005C2148.79 658.005 2179.06 646.901 2201.62 624.692C2224.01 602.483 2235.29 568.811 2235.29 523.856V187.856H2338.8V522.602C2338.8 566.841 2330.2 606.423 2313.01 641.349C2295.82 676.453 2270.39 704.035 2236.54 724.453C2202.7 744.871 2160.43 755.08 2109.93 755.08Z" fill="white" />
+          <path d="M2610.15 743.259V187.856H2713.66V648.871H2949.33V743.259H2610.15Z" fill="white" />
+          <path d="M3366.54 755.081C3326.97 755.081 3288.28 749.35 3250.5 737.887C3212.89 726.424 3181.01 709.947 3155.05 688.454L3205.01 610.365C3217.73 622.007 3232.95 632.036 3250.68 640.454C3268.41 648.872 3287.21 655.499 3307.27 660.156C3327.15 664.813 3347.2 667.141 3366.9 667.141C3400.03 667.141 3426.72 661.051 3447.31 648.693C3467.73 636.335 3478.11 618.604 3478.11 595.32C3478.11 577.41 3470.95 562.186 3456.98 549.648C3442.83 537.29 3416.51 525.648 3377.83 514.723L3324.28 499.32C3270.02 483.917 3230.8 463.499 3206.44 437.708C3182.09 411.917 3169.91 380.216 3169.91 342.783C3169.91 318.245 3174.93 295.857 3185.13 275.619C3195.34 255.38 3209.67 237.827 3227.93 223.141C3246.38 208.275 3268.05 196.813 3293.12 188.753C3318.19 180.693 3345.59 176.574 3375.14 176.574C3414 176.574 3450.18 182.305 3483.49 193.589C3516.79 205.051 3544.02 220.275 3565.15 239.619L3513.93 315.021C3502.83 304.633 3489.75 295.857 3474.71 288.156C3459.67 280.633 3443.37 274.723 3426 270.424C3408.63 266.126 3390.9 264.156 3373.17 264.156C3352.22 264.156 3333.95 267.021 3318.37 272.932C3302.79 278.842 3290.61 287.081 3281.84 298.186C3273.06 309.111 3268.76 322.365 3268.76 337.589C3268.76 349.23 3271.81 359.26 3277.72 367.499C3283.63 375.917 3293.84 383.439 3308.52 390.424C3323.03 397.41 3343.08 404.753 3368.87 412.454L3425.28 429.111C3478.47 444.693 3517.15 464.753 3541.51 489.29C3565.86 513.827 3578.04 545.529 3578.04 584.753C3578.04 618.424 3569.62 647.977 3552.61 673.589C3535.6 699.201 3511.42 719.26 3479.9 733.768C3448.39 748.096 3410.6 755.439 3366.72 755.439L3366.54 755.081Z" fill="white" />
+          <path d="M3816.78 743.259V187.856H4186.41V278.304H3920.29V412.811H4147.91V497.348H3920.29V652.095H4189.27V743.259H3816.78Z" fill="white" />
+        </svg>
       </div>
 
-      <nav className="main-nav" aria-label="Primary">
-        <button type="button" className={activeTab === "wallets" && !selectedWalletId ? "active" : ""} onClick={onSelectWallets}>
-          Wallets
-        </button>
-        <div className="wallet-nav-list">
-          {wallets.map((wallet) => (
-            <button
-              key={wallet.id}
-              type="button"
-              className={activeTab === "wallets" && selectedWalletId === wallet.id ? "nested active" : "nested"}
-              onClick={() => onSelectWallet(wallet.id)}
-            >
-              <span>{wallet.name}</span>
-              {connectedWalletId === wallet.id ? <span className="connector-dot" title="Connected wallet" /> : null}
-            </button>
-          ))}
-        </div>
-        <button type="button" className={activeTab === "dapps" ? "active" : ""} onClick={onSelectDapps}>
-          DApps
-        </button>
-        <button type="button" className={activeTab === "settings" ? "active" : ""} onClick={onSelectSettings}>
-          Settings
-        </button>
+      <button type="button" className="add-wallet-button" onClick={onAddWallet}>
+        <Plus size={18} aria-hidden="true" />
+        <span>Add wallet</span>
+      </button>
+
+      <nav className="main-nav wallet-nav-list" aria-label="Wallets">
+        {wallets.map((wallet) => (
+          <button
+            key={wallet.id}
+            type="button"
+            className={activeTab === "wallets" && selectedWalletId === wallet.id ? "active" : ""}
+            onClick={() => onSelectWallet(wallet.id)}
+          >
+            <Wallet size={18} aria-hidden="true" />
+            <span>{wallet.name}</span>
+          </button>
+        ))}
       </nav>
+
+      <button
+        type="button"
+        className={activeTab === "settings" ? "side-menu-settings active" : "side-menu-settings"}
+        onClick={onSelectSettings}
+      >
+        <SettingsIcon size={18} aria-hidden="true" />
+        <span>Settings</span>
+      </button>
     </aside>
   );
 }

@@ -52,7 +52,6 @@ type AppConfig = {
   network: MidnightNetwork;
   endpoints: NetworkEndpoints;
   wallets: WalletConfig[];
-  connectedWalletId: string | null;
 };
 
 type NetworkEndpoints = {
@@ -762,7 +761,6 @@ function defaultConfig(): AppConfig {
       nodeWsUrl: "wss://rpc.preprod.midnight.network/ws",
     },
     wallets: [],
-    connectedWalletId: null,
   };
 }
 

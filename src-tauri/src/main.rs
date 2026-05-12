@@ -46,7 +46,6 @@ struct AppConfig {
     network: MidnightNetwork,
     endpoints: NetworkEndpoints,
     wallets: Vec<WalletConfig>,
-    connected_wallet_id: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -55,7 +54,6 @@ impl Default for AppConfig {
             network: MidnightNetwork::default(),
             endpoints: NetworkEndpoints::default(),
             wallets: Vec::new(),
-            connected_wallet_id: None,
         }
     }
 }
@@ -378,29 +376,6 @@ fn add_wallet(
         addresses,
     });
 
-    if config.connected_wallet_id.is_none() {
-        config.connected_wallet_id = Some(id);
-    }
-
-    save_config(&state.config_path, &config)?;
-    Ok(config.clone())
-}
-
-#[tauri::command]
-fn set_connected_wallet(
-    wallet_id: Option<String>,
-    state: State<'_, Arc<AppState>>,
-) -> Result<AppConfig, String> {
-    let mut config = state.config.lock().map_err(|error| error.to_string())?;
-
-    if let Some(wallet_id) = wallet_id.as_deref() {
-        let exists = config.wallets.iter().any(|wallet| wallet.id == wallet_id);
-        if !exists {
-            return Err("Unknown wallet".to_string());
-        }
-    }
-
-    config.connected_wallet_id = wallet_id;
     save_config(&state.config_path, &config)?;
     Ok(config.clone())
 }
@@ -452,6 +427,15 @@ fn get_proof_server_status(
         .map_err(|error| error.to_string())?;
     proof_server.ensure_running(&app);
     Ok(proof_server.status())
+}
+
+#[tauri::command]
+fn open_external_url(app: AppHandle, url: String) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("Only http and https URLs are supported".to_string());
+    }
+
+    app.shell().open(&url, None).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -715,9 +699,9 @@ fn main() {
             get_app_config,
             get_proof_server_status,
             get_wallet_sync_status,
+            open_external_url,
             restart_proof_server,
             set_active_sync_wallet,
-            set_connected_wallet,
             set_network_endpoints,
             set_network
         ])
