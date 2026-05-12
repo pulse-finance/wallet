@@ -3,7 +3,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::hash_map::DefaultHasher,
     fs,
+    hash::{Hash, Hasher},
     io::{Read, Write},
     net::{SocketAddr, TcpStream},
     path::PathBuf,
@@ -33,16 +35,43 @@ impl Default for MidnightNetwork {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
 struct AppConfig {
     network: MidnightNetwork,
+    wallets: Vec<WalletConfig>,
+    connected_wallet_id: Option<String>,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             network: MidnightNetwork::default(),
+            wallets: Vec::new(),
+            connected_wallet_id: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WalletConfig {
+    id: String,
+    name: String,
+    phrase: String,
+    addresses: WalletAddresses,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct WalletAddresses {
+    unshielded: String,
+    shielded: String,
+    dust: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AddWalletRequest {
+    name: Option<String>,
+    phrase: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -88,10 +117,9 @@ impl ProofServerSupervisor {
             return;
         }
 
-        if self
-            .last_started
-            .is_some_and(|started| started.elapsed() < Duration::from_secs(PROOF_SERVER_STARTUP_GRACE_SECONDS))
-        {
+        if self.last_started.is_some_and(|started| {
+            started.elapsed() < Duration::from_secs(PROOF_SERVER_STARTUP_GRACE_SECONDS)
+        }) {
             return;
         }
 
@@ -113,12 +141,15 @@ impl ProofServerSupervisor {
             }
         };
 
-        match app.shell().sidecar("midnight-proof-server").and_then(|command| {
-            command
-                .args(["--port", "6300", "--verbose"])
-                .current_dir(data_dir)
-                .spawn()
-        }) {
+        match app
+            .shell()
+            .sidecar("midnight-proof-server")
+            .and_then(|command| {
+                command
+                    .args(["--port", "6300", "--verbose"])
+                    .current_dir(data_dir)
+                    .spawn()
+            }) {
             Ok((mut rx, child)) => {
                 let pid = child.pid();
                 self.child = Some(child);
@@ -175,6 +206,60 @@ fn set_network(
 }
 
 #[tauri::command]
+fn add_wallet(
+    request: AddWalletRequest,
+    state: State<'_, Arc<AppState>>,
+) -> Result<AppConfig, String> {
+    let phrase = request.phrase.trim().to_string();
+    if phrase.is_empty() {
+        return Err("Wallet phrase is required".to_string());
+    }
+
+    let mut config = state.config.lock().map_err(|error| error.to_string())?;
+    let wallet_number = config.wallets.len() + 1;
+    let name = request
+        .name
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| format!("Wallet {wallet_number}"));
+    let id = wallet_id(&name, &phrase, wallet_number);
+    let addresses = derive_placeholder_addresses(&id);
+
+    config.wallets.push(WalletConfig {
+        id: id.clone(),
+        name,
+        phrase,
+        addresses,
+    });
+
+    if config.connected_wallet_id.is_none() {
+        config.connected_wallet_id = Some(id);
+    }
+
+    save_config(&state.config_path, &config)?;
+    Ok(config.clone())
+}
+
+#[tauri::command]
+fn set_connected_wallet(
+    wallet_id: Option<String>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<AppConfig, String> {
+    let mut config = state.config.lock().map_err(|error| error.to_string())?;
+
+    if let Some(wallet_id) = wallet_id.as_deref() {
+        let exists = config.wallets.iter().any(|wallet| wallet.id == wallet_id);
+        if !exists {
+            return Err("Unknown wallet".to_string());
+        }
+    }
+
+    config.connected_wallet_id = wallet_id;
+    save_config(&state.config_path, &config)?;
+    Ok(config.clone())
+}
+
+#[tauri::command]
 fn get_proof_server_status(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
@@ -201,7 +286,10 @@ fn restart_proof_server(
 }
 
 fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let app_config_dir = app.path().app_config_dir().map_err(|error| error.to_string())?;
+    let app_config_dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| error.to_string())?;
     fs::create_dir_all(&app_config_dir).map_err(|error| error.to_string())?;
     Ok(app_config_dir.join("config.json"))
 }
@@ -226,6 +314,29 @@ fn load_config(path: &PathBuf) -> AppConfig {
 fn save_config(path: &PathBuf, config: &AppConfig) -> Result<(), String> {
     let contents = serde_json::to_string_pretty(config).map_err(|error| error.to_string())?;
     fs::write(path, contents).map_err(|error| error.to_string())
+}
+
+fn wallet_id(name: &str, phrase: &str, wallet_number: usize) -> String {
+    let mut hasher = DefaultHasher::new();
+    name.hash(&mut hasher);
+    phrase.hash(&mut hasher);
+    wallet_number.hash(&mut hasher);
+    format!("wallet-{:016x}", hasher.finish())
+}
+
+fn derive_placeholder_addresses(wallet_id: &str) -> WalletAddresses {
+    WalletAddresses {
+        unshielded: format!("mn_unshielded_{}", address_suffix(wallet_id, "unshielded")),
+        shielded: format!("mn_shielded_{}", address_suffix(wallet_id, "shielded")),
+        dust: format!("mn_dust_{}", address_suffix(wallet_id, "dust")),
+    }
+}
+
+fn address_suffix(wallet_id: &str, kind: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    wallet_id.hash(&mut hasher);
+    kind.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 fn proof_server_is_online() -> bool {
@@ -283,9 +394,11 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            add_wallet,
             get_app_config,
             get_proof_server_status,
             restart_proof_server,
+            set_connected_wallet,
             set_network
         ])
         .run(tauri::generate_context!())
