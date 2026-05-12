@@ -1,14 +1,293 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use serde::{Deserialize, Serialize};
+use std::{
+    fs,
+    io::{Read, Write},
+    net::{SocketAddr, TcpStream},
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+use tauri::{AppHandle, Manager, State};
+use tauri_plugin_shell::{process::CommandChild, ShellExt};
+
+const PROOF_SERVER_HOST: &str = "127.0.0.1";
+const PROOF_SERVER_PORT: u16 = 6300;
+const PROOF_SERVER_URL: &str = "http://localhost:6300";
+const PROOF_SERVER_STARTUP_GRACE_SECONDS: u64 = 10;
+const WATCHDOG_INTERVAL_SECONDS: u64 = 2;
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum MidnightNetwork {
+    Preprod,
+    Mainnet,
+}
+
+impl Default for MidnightNetwork {
+    fn default() -> Self {
+        Self::Preprod
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct AppConfig {
+    network: MidnightNetwork,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            network: MidnightNetwork::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProofServerStatus {
+    url: &'static str,
+    online: bool,
+    pid: Option<u32>,
+    restarts: u64,
+    last_error: Option<String>,
+}
+
+struct ProofServerSupervisor {
+    child: Option<CommandChild>,
+    last_started: Option<Instant>,
+    last_error: Option<String>,
+    restarts: u64,
+}
+
+impl ProofServerSupervisor {
+    fn new() -> Self {
+        Self {
+            child: None,
+            last_started: None,
+            last_error: None,
+            restarts: 0,
+        }
+    }
+
+    fn status(&self) -> ProofServerStatus {
+        ProofServerStatus {
+            url: PROOF_SERVER_URL,
+            online: proof_server_is_online(),
+            pid: self.child.as_ref().map(CommandChild::pid),
+            restarts: self.restarts,
+            last_error: self.last_error.clone(),
+        }
+    }
+
+    fn ensure_running(&mut self, app: &AppHandle) {
+        if proof_server_is_online() {
+            self.last_error = None;
+            return;
+        }
+
+        if self
+            .last_started
+            .is_some_and(|started| started.elapsed() < Duration::from_secs(PROOF_SERVER_STARTUP_GRACE_SECONDS))
+        {
+            return;
+        }
+
+        self.restart(app);
+    }
+
+    fn restart(&mut self, app: &AppHandle) {
+        if let Some(child) = self.child.take() {
+            let _ = child.kill();
+        }
+
+        let data_dir = match proof_server_data_dir(app) {
+            Ok(data_dir) => data_dir,
+            Err(error) => {
+                self.child = None;
+                self.last_started = None;
+                self.last_error = Some(error);
+                return;
+            }
+        };
+
+        match app.shell().sidecar("midnight-proof-server").and_then(|command| {
+            command
+                .args(["--port", "6300", "--verbose"])
+                .current_dir(data_dir)
+                .spawn()
+        }) {
+            Ok((mut rx, child)) => {
+                let pid = child.pid();
+                self.child = Some(child);
+                self.last_started = Some(Instant::now());
+                self.last_error = None;
+                self.restarts += 1;
+
+                tauri::async_runtime::spawn(async move {
+                    while let Some(event) = rx.recv().await {
+                        match event {
+                            tauri_plugin_shell::process::CommandEvent::Stderr(line)
+                            | tauri_plugin_shell::process::CommandEvent::Stdout(line) => {
+                                let line = String::from_utf8_lossy(&line);
+                                println!("[proof-server:{pid}] {}", line.trim_end());
+                            }
+                            tauri_plugin_shell::process::CommandEvent::Terminated(payload) => {
+                                println!("[proof-server:{pid}] terminated: {payload:?}");
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                });
+            }
+            Err(error) => {
+                self.child = None;
+                self.last_started = None;
+                self.last_error = Some(error.to_string());
+            }
+        }
+    }
+}
+
+struct AppState {
+    config_path: PathBuf,
+    config: Mutex<AppConfig>,
+    proof_server: Mutex<ProofServerSupervisor>,
+}
+
 #[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
+fn get_app_config(state: State<'_, Arc<AppState>>) -> AppConfig {
+    state.config.lock().expect("config mutex poisoned").clone()
+}
+
+#[tauri::command]
+fn set_network(
+    network: MidnightNetwork,
+    state: State<'_, Arc<AppState>>,
+) -> Result<AppConfig, String> {
+    let mut config = state.config.lock().map_err(|error| error.to_string())?;
+    config.network = network;
+    save_config(&state.config_path, &config)?;
+    Ok(config.clone())
+}
+
+#[tauri::command]
+fn get_proof_server_status(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<ProofServerStatus, String> {
+    let mut proof_server = state
+        .proof_server
+        .lock()
+        .map_err(|error| error.to_string())?;
+    proof_server.ensure_running(&app);
+    Ok(proof_server.status())
+}
+
+#[tauri::command]
+fn restart_proof_server(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<ProofServerStatus, String> {
+    let mut proof_server = state
+        .proof_server
+        .lock()
+        .map_err(|error| error.to_string())?;
+    proof_server.restart(&app);
+    Ok(proof_server.status())
+}
+
+fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let app_config_dir = app.path().app_config_dir().map_err(|error| error.to_string())?;
+    fs::create_dir_all(&app_config_dir).map_err(|error| error.to_string())?;
+    Ok(app_config_dir.join("config.json"))
+}
+
+fn proof_server_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let data_dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|error| error.to_string())?
+        .join("proof-server");
+    fs::create_dir_all(&data_dir).map_err(|error| error.to_string())?;
+    Ok(data_dir)
+}
+
+fn load_config(path: &PathBuf) -> AppConfig {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| serde_json::from_str(&contents).ok())
+        .unwrap_or_default()
+}
+
+fn save_config(path: &PathBuf, config: &AppConfig) -> Result<(), String> {
+    let contents = serde_json::to_string_pretty(config).map_err(|error| error.to_string())?;
+    fs::write(path, contents).map_err(|error| error.to_string())
+}
+
+fn proof_server_is_online() -> bool {
+    let address = SocketAddr::from(([127, 0, 0, 1], PROOF_SERVER_PORT));
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(500)) else {
+        return false;
+    };
+
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let _ = stream.write_all(
+        format!(
+            "GET /version HTTP/1.1\r\nHost: {PROOF_SERVER_HOST}:{PROOF_SERVER_PORT}\r\nConnection: close\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+
+    let mut response = [0; 12];
+    stream.read(&mut response).is_ok()
+}
+
+fn start_watchdog(app: AppHandle, state: Arc<AppState>) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            if let Ok(mut proof_server) = state.proof_server.lock() {
+                proof_server.ensure_running(&app);
+            }
+
+            tokio::time::sleep(Duration::from_secs(WATCHDOG_INTERVAL_SECONDS)).await;
+        }
+    });
 }
 
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![greet])
+        .plugin(tauri_plugin_shell::init())
+        .setup(|app| {
+            let app_handle = app.handle().clone();
+            let config_path = config_path(&app_handle)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
+            let config = load_config(&config_path);
+            save_config(&config_path, &config)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
+            proof_server_data_dir(&app_handle)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
+
+            let state = Arc::new(AppState {
+                config_path,
+                config: Mutex::new(config),
+                proof_server: Mutex::new(ProofServerSupervisor::new()),
+            });
+
+            app.manage(state.clone());
+            start_watchdog(app_handle, state);
+
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            get_app_config,
+            get_proof_server_status,
+            restart_proof_server,
+            set_network
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
