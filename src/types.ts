@@ -1,4 +1,4 @@
-export type AppTab = "wallets" | "dapps";
+export type AppTab = "wallets" | "dapps" | "settings";
 
 export type MidnightNetwork = "preprod" | "mainnet";
 
@@ -17,8 +17,16 @@ export type WalletConfig = {
 
 export type AppConfig = {
   network: MidnightNetwork;
+  endpoints: NetworkEndpoints;
   wallets: WalletConfig[];
   connectedWalletId: string | null;
+};
+
+export type NetworkEndpoints = {
+  indexerUrl: string;
+  indexerWsUrl: string;
+  nodeUrl: string;
+  nodeWsUrl: string;
 };
 
 export type ProofServerStatus = {
@@ -27,4 +35,39 @@ export type ProofServerStatus = {
   pid: number | null;
   restarts: number;
   lastError: string | null;
+};
+
+export type SyncPartStatus = {
+  currentIndex: number;
+  highestIndex: number;
+};
+
+export type WalletSyncStatus = {
+  walletId: string;
+  percentage: number;
+  shielded: SyncPartStatus;
+  unshielded: SyncPartStatus;
+  dust: SyncPartStatus;
+  active: boolean;
+  updatedAtMs: number;
+  synced: boolean;
+  syncing: boolean;
+  error: string | null;
+  shieldedAssets: AssetBalance[];
+  unshieldedAssets: AssetBalance[];
+  dustBalance: string | null;
+  transactionHistory: WalletTransaction[];
+};
+
+export type AssetBalance = {
+  tokenType: string;
+  amount: string;
+};
+
+export type WalletTransaction = {
+  hash: string;
+  status: string;
+  timestamp: string | null;
+  fees: string | null;
+  identifiers: string[];
 };

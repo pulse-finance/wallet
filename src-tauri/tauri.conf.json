@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "com.pulse-finance-wallet.app",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "pnpm build:sidecar && pnpm dev",
     "beforeBuildCommand": "pnpm build",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../dist"

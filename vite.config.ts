@@ -1,9 +1,13 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import topLevelAwait from "vite-plugin-top-level-await";
+import wasm from "vite-plugin-wasm";
+
+const tauriTarget = process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome105" : "safari13";
 
 // https://vitejs.dev/config/
 export default defineConfig(async () => ({
-  plugins: [react()],
+  plugins: [wasm(), topLevelAwait(), react()],
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
@@ -17,5 +21,18 @@ export default defineConfig(async () => ({
       // 3. tell vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],
     },
+  },
+  resolve: {
+    alias: {
+      assert: "assert",
+    },
+  },
+  esbuild: {
+    target: tauriTarget,
+  },
+  build: {
+    target: tauriTarget,
+    minify: !process.env.TAURI_ENV_DEBUG ? "esbuild" : false,
+    sourcemap: !!process.env.TAURI_ENV_DEBUG,
   },
 }));

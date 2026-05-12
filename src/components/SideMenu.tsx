@@ -8,6 +8,7 @@ type SideMenuProps = {
   onSelectWallets: () => void;
   onSelectWallet: (walletId: string) => void;
   onSelectDapps: () => void;
+  onSelectSettings: () => void;
 };
 
 export function SideMenu({
@@ -18,6 +19,7 @@ export function SideMenu({
   onSelectWallets,
   onSelectWallet,
   onSelectDapps,
+  onSelectSettings,
 }: SideMenuProps) {
   return (
     <aside className="side-menu">
@@ -45,6 +47,9 @@ export function SideMenu({
         </div>
         <button type="button" className={activeTab === "dapps" ? "active" : ""} onClick={onSelectDapps}>
           DApps
+        </button>
+        <button type="button" className={activeTab === "settings" ? "active" : ""} onClick={onSelectSettings}>
+          Settings
         </button>
       </nav>
     </aside>

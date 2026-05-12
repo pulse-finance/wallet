@@ -4,11 +4,57 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Tauri + React + Typescript</title>
+    <title>Pulse Finance Wallet</title>
   </head>
 
   <body>
+    <div
+      id="boot-status"
+      style="
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #111827;
+        color: #f9fafb;
+        font: 16px system-ui, sans-serif;
+      "
+    >
+      Loading frontend bundle...
+    </div>
     <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <script>
+      if (!globalThis.global) {
+        globalThis.global = globalThis;
+      }
+
+      if (!globalThis.process) {
+        globalThis.process = {
+          env: {},
+          pid: 1,
+          browser: true,
+          version: "",
+          versions: {},
+          argv: [],
+          cwd: () => "/",
+          nextTick: (callback, ...args) => Promise.resolve().then(() => callback(...args)),
+        };
+      }
+    </script>
+    <script type="module">
+      import("/src/main.tsx").catch((error) => {
+        console.error("Failed to load frontend entry", error);
+
+        const target = document.getElementById("boot-status");
+        if (target) {
+          target.textContent = `Failed to load frontend entry: ${error?.stack ?? error?.message ?? String(error)}`;
+          target.style.whiteSpace = "pre-wrap";
+          target.style.padding = "24px";
+          target.style.alignItems = "flex-start";
+          target.style.justifyContent = "flex-start";
+        }
+      });
+    </script>
   </body>
 </html>

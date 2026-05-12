@@ -1,11 +1,13 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { DappBrowserPage } from "./components/DappBrowserPage";
+import { SettingsPage } from "./components/SettingsPage";
 import { SideMenu } from "./components/SideMenu";
 import { WalletCreationModal } from "./components/WalletCreationModal";
 import { WalletDetailPage } from "./components/WalletDetailPage";
 import { WalletOverviewPage } from "./components/WalletOverviewPage";
-import { AppConfig, AppTab, MidnightNetwork, ProofServerStatus } from "./types";
+import { AppConfig, AppTab, MidnightNetwork, NetworkEndpoints, ProofServerStatus, WalletSyncStatus } from "./types";
+import { DerivedWalletDisplay, deriveDisplayAddresses } from "./walletAddresses";
 import "./App.css";
 
 const NETWORK_LABELS: Record<MidnightNetwork, string> = {
@@ -17,6 +19,12 @@ const HEALTHCHECK_INTERVAL_MS = 2_000;
 
 const emptyConfig: AppConfig = {
   network: "preprod",
+  endpoints: {
+    indexerUrl: "https://indexer.preprod.midnight.network/api/v4/graphql",
+    indexerWsUrl: "wss://indexer.preprod.midnight.network/api/v4/graphql/ws",
+    nodeUrl: "https://rpc.preprod.midnight.network",
+    nodeWsUrl: "wss://rpc.preprod.midnight.network/ws",
+  },
   wallets: [],
   connectedWalletId: null,
 };
@@ -27,6 +35,7 @@ function App() {
   const [selectedWalletId, setSelectedWalletId] = useState<string | null>(null);
   const [config, setConfig] = useState<AppConfig>(emptyConfig);
   const [status, setStatus] = useState<ProofServerStatus | null>(null);
+  const [syncStatuses, setSyncStatuses] = useState<WalletSyncStatus[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [showAddWallet, setShowAddWallet] = useState(false);
   const [walletPhrase, setWalletPhrase] = useState("");
@@ -39,6 +48,12 @@ function App() {
 
   const selectedWallet = config.wallets.find((wallet) => wallet.id === selectedWalletId) ?? null;
   const connectedWallet = config.wallets.find((wallet) => wallet.id === config.connectedWalletId) ?? null;
+  const prioritySyncWalletId =
+    activeTab === "wallets" && selectedWallet ? selectedWallet.id : activeTab === "dapps" ? config.connectedWalletId : null;
+  const displayAddressesByWalletId = useMemo(
+    () => new Map<string, DerivedWalletDisplay>(config.wallets.map((wallet) => [wallet.id, deriveDisplayAddresses(wallet, config.network)])),
+    [config.network, config.wallets],
+  );
 
   const loadConfig = useCallback(async () => {
     if (!runningInTauri) {
@@ -70,12 +85,39 @@ function App() {
     }
   }, [runningInTauri]);
 
+  const refreshSyncStatus = useCallback(async () => {
+    if (!runningInTauri) {
+      return;
+    }
+
+    try {
+      setSyncStatuses(await invoke<WalletSyncStatus[]>("get_wallet_sync_status"));
+    } catch (caught) {
+      setError(formatError(caught));
+    }
+  }, [runningInTauri]);
+
   useEffect(() => {
     loadConfig();
     refreshStatus();
-    const interval = window.setInterval(refreshStatus, HEALTHCHECK_INTERVAL_MS);
+    refreshSyncStatus();
+    const interval = window.setInterval(() => {
+      refreshStatus();
+      refreshSyncStatus();
+    }, HEALTHCHECK_INTERVAL_MS);
     return () => window.clearInterval(interval);
-  }, [loadConfig, refreshStatus]);
+  }, [loadConfig, refreshStatus, refreshSyncStatus]);
+
+  useEffect(() => {
+    if (!runningInTauri || config.wallets.length === 0) {
+      setSyncStatuses([]);
+      return;
+    }
+
+    invoke("set_active_sync_wallet", { walletId: prioritySyncWalletId }).catch((caught) => {
+      setError(formatError(caught));
+    });
+  }, [config.wallets.length, prioritySyncWalletId, runningInTauri]);
 
   async function handleNetworkChange(network: MidnightNetwork) {
     setConfig((current) => ({ ...current, network }));
@@ -114,6 +156,15 @@ function App() {
   async function handleConnectedWallet(walletId: string | null) {
     try {
       setConfig(await invoke<AppConfig>("set_connected_wallet", { walletId }));
+      setError(null);
+    } catch (caught) {
+      setError(formatError(caught));
+    }
+  }
+
+  async function handleEndpointSave(endpoints: NetworkEndpoints) {
+    try {
+      setConfig(await invoke<AppConfig>("set_network_endpoints", { request: endpoints }));
       setError(null);
     } catch (caught) {
       setError(formatError(caught));
@@ -168,16 +219,31 @@ function App() {
           setSelectedWalletId(walletId);
         }}
         onSelectDapps={() => setActiveTab("dapps")}
+        onSelectSettings={() => setActiveTab("settings")}
       />
 
       <main className="workspace">
         {activeTab === "wallets" && !selectedWallet ? (
-          <WalletOverviewPage wallets={config.wallets} onAdd={() => setShowAddWallet(true)} onOpen={setSelectedWalletId} />
+          <WalletOverviewPage
+            wallets={config.wallets}
+            displayAddressesByWalletId={displayAddressesByWalletId}
+            syncStatuses={syncStatuses}
+            onAdd={() => setShowAddWallet(true)}
+            onOpen={setSelectedWalletId}
+          />
         ) : null}
 
         {activeTab === "wallets" && selectedWallet ? (
           <WalletDetailPage
             wallet={selectedWallet}
+            displayAddresses={
+              displayAddressesByWalletId.get(selectedWallet.id)?.addresses ?? {
+                unshielded: { value: null, error: "Wallet not found" },
+                shielded: { value: null, error: "Wallet not found" },
+                dust: { value: null, error: "Wallet not found" },
+              }
+            }
+            syncStatus={syncStatuses.find((syncStatus) => syncStatus.walletId === selectedWallet.id) ?? null}
             connected={config.connectedWalletId === selectedWallet.id}
             onConnect={() => handleConnectedWallet(selectedWallet.id)}
           />
@@ -198,6 +264,8 @@ function App() {
             onRefresh={refreshBrowser}
           />
         ) : null}
+
+        {activeTab === "settings" ? <SettingsPage endpoints={config.endpoints} onSave={handleEndpointSave} /> : null}
       </main>
 
       <footer className="bottom-bar">
