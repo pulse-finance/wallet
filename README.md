@@ -1,0 +1,2 @@
+# wallet
+Midnight desktop wallet
