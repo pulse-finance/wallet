@@ -20,6 +20,15 @@ import {
   type FacadeState,
   type WalletEntry,
 } from "@midnight-ntwrk/wallet-sdk";
+import {
+  deriveUnshieldedAddress,
+  migrateWalletCache,
+  readWalletCache,
+  snapshotFromState,
+  snapshotIndexProgress,
+  writeWalletCacheSnapshot,
+  type WalletSdkSnapshot,
+} from "./wallet-cache.js";
 
 if (!globalThis.Buffer) {
   globalThis.Buffer = Buffer;
@@ -63,8 +72,10 @@ type NetworkEndpoints = {
 
 type WalletConfig = {
   id: string;
+  legacyId?: string;
   name: string;
   phrase: string;
+  network?: MidnightNetwork;
   addresses?: Partial<WalletAddresses>;
 };
 
@@ -113,16 +124,6 @@ type WalletSyncStatus = {
   transactionHistory: WalletTransaction[];
 };
 
-type WalletSdkSnapshot = {
-  walletId: string;
-  unshieldedAddress: string;
-  completedFullSync?: boolean;
-  shieldedState: string;
-  unshieldedState: string;
-  dustState: string;
-  txHistory: string;
-};
-
 type ProgressLike = {
   appliedIndex?: bigint | number;
   appliedId?: bigint | number;
@@ -159,19 +160,15 @@ type SnapshotWriter = {
   flush(): Promise<void>;
 };
 
-type TransactionHistoryStorageLike = {
-  serialize(): Promise<string>;
-};
-
 const args = parseArgs(process.argv.slice(2));
 const configPath = requiredArg(args, "config");
 const cacheDir = requiredArg(args, "cache-dir");
 const syncDir = path.join(cacheDir, "wallet-sync");
-const sdkDir = path.join(syncDir, "sdk");
 const statusPath = path.join(syncDir, "status.json");
 const controlPath = path.join(syncDir, "control.json");
 
-fs.mkdirSync(sdkDir, { recursive: true });
+fs.mkdirSync(syncDir, { recursive: true });
+removeStaleRootCacheFiles();
 
 let currentSignature: string | null = null;
 let manager: SyncManager | null = null;
@@ -199,17 +196,21 @@ async function shutdown(code: number): Promise<void> {
 async function reloadIfNeeded(): Promise<void> {
   const config = readJson<AppConfig>(configPath, defaultConfig());
   const control = readJson<ControlFile>(controlPath, { activeWalletId: null });
+  const networkWallets = activeNetworkWallets(config);
+  const activeWalletId = canonicalActiveWalletId(control.activeWalletId, networkWallets);
+  if (activeWalletId !== control.activeWalletId) {
+    atomicWriteJson(controlPath, { ...control, activeWalletId, updatedAtMs: Date.now() });
+  }
   const signature = JSON.stringify({
     network: config.network,
     endpoints: config.endpoints,
     wallets:
-      config.wallets?.map((wallet) => ({
+      networkWallets.map((wallet) => ({
         id: wallet.id,
         phrase: wallet.phrase,
         name: wallet.name,
-        unshieldedAddress: walletCacheAddress(wallet),
       })) ?? [],
-    activeWalletId: control.activeWalletId ?? null,
+    activeWalletId,
   });
 
   if (signature === currentSignature) return;
@@ -219,7 +220,7 @@ async function reloadIfNeeded(): Promise<void> {
     await manager.stop();
   }
 
-  manager = startSyncManager(config, control.activeWalletId ?? null);
+  manager = startSyncManager(config, activeWalletId);
 }
 
 function startSyncManager(config: AppConfig, priorityWalletId: string | null): SyncManager {
@@ -230,13 +231,14 @@ function startSyncManager(config: AppConfig, priorityWalletId: string | null): S
   let statusTimer: Timer | null = null;
   let resyncTimer: Timer | null = null;
 
-  const wallets = [...(config.wallets ?? [])].sort((left, right) => {
+  const networkWallets = activeNetworkWallets(config);
+  const wallets = [...networkWallets].sort((left, right) => {
     if (left.id === priorityWalletId) return -1;
     if (right.id === priorityWalletId) return 1;
     return 0;
   });
 
-  for (const wallet of config.wallets ?? []) {
+  for (const wallet of networkWallets) {
     statuses.set(wallet.id, pendingStatus(wallet.id, wallet.id === priorityWalletId));
   }
   writeStatuses();
@@ -257,7 +259,7 @@ function startSyncManager(config: AppConfig, priorityWalletId: string | null): S
   function writeStatuses(): void {
     const status = {
       updatedAtMs: Date.now(),
-      wallets: (config.wallets ?? []).map((wallet) => statuses.get(wallet.id) ?? pendingStatus(wallet.id, wallet.id === priorityWalletId)),
+      wallets: networkWallets.map((wallet) => statuses.get(wallet.id) ?? pendingStatus(wallet.id, wallet.id === priorityWalletId)),
     };
     atomicWriteJson(statusPath, status);
   }
@@ -340,7 +342,8 @@ async function startWalletSync({ config, wallet, active, onStatus }: StartWallet
     throw new Error(`${wallet.name} has an invalid wallet phrase`);
   }
 
-  const snapshot = readJson<WalletSdkSnapshot | null>(snapshotPath(wallet), null);
+  await migrateWalletCache(syncDir, config.network, wallet);
+  const snapshot = readWalletCache(syncDir, config.network, wallet);
   const seed = mnemonicToSeedSync(wallet.phrase);
   const hdWallet = HDWallet.fromSeed(seed);
 
@@ -402,7 +405,7 @@ async function startWalletSync({ config, wallet, active, onStatus }: StartWallet
         : DustWallet(configuration).startWithSecretKey(dustSecretKey, ledger.LedgerParameters.initialParameters().dust),
   });
 
-  const snapshotSaver = createSyncProgressSnapshotSaver(wallet);
+  const snapshotSaver = createSyncProgressSnapshotSaver(config, wallet);
   const statusPublisher = createStatusPublisher(wallet.id, active, facade);
   let completedFullSync = snapshot?.completedFullSync === true;
   const subscription = facade.state().subscribe({
@@ -416,7 +419,7 @@ async function startWalletSync({ config, wallet, active, onStatus }: StartWallet
           onStatus(status);
         }
         if (snapshotSaver.shouldSave(state)) {
-          await snapshotSaver.schedule(await snapshotFromState(wallet, state, txHistoryStorage));
+          await snapshotSaver.schedule(await snapshotFromState(config.network, wallet, state, txHistoryStorage));
         }
       })();
     },
@@ -498,23 +501,7 @@ function createStatusPublisher(walletId: string, active: boolean, facade: Wallet
   };
 }
 
-async function snapshotFromState(
-  wallet: WalletConfig,
-  state: FacadeState,
-  txHistoryStorage: TransactionHistoryStorageLike,
-): Promise<WalletSdkSnapshot> {
-  return {
-    walletId: wallet.id,
-    unshieldedAddress: walletCacheAddress(wallet),
-    completedFullSync: state.isSynced,
-    shieldedState: state.shielded.serialize(),
-    unshieldedState: state.unshielded.serialize(),
-    dustState: state.dust.serialize(),
-    txHistory: await txHistoryStorage.serialize(),
-  };
-}
-
-function createSyncProgressSnapshotSaver(wallet: WalletConfig): SnapshotWriter {
+function createSyncProgressSnapshotSaver(config: AppConfig, wallet: WalletConfig): SnapshotWriter {
   let pendingSnapshot: WalletSdkSnapshot | null = null;
   let saveTimer: Timer | null = null;
   let lastSavedAt = 0;
@@ -523,14 +510,13 @@ function createSyncProgressSnapshotSaver(wallet: WalletConfig): SnapshotWriter {
   let lastScheduledCursor: string | null = null;
   let syncedCheckpointScheduled = false;
   const walletId = wallet.id;
-  const checkpointPath = snapshotPath(wallet);
 
   function save(snapshot: WalletSdkSnapshot, indexProgress: number): Promise<void> {
     lastSavedAt = Date.now();
     lastSavedIndex = Math.max(lastSavedIndex, indexProgress);
     saveChain = saveChain
       .then(async () => {
-        atomicWriteJson(checkpointPath, snapshot);
+        writeWalletCacheSnapshot(syncDir, config.network, wallet, snapshot);
       })
       .catch((caught: unknown) => {
         console.error(`[wallet-sync:${walletId}] failed to save sync checkpoint`, caught);
@@ -650,21 +636,6 @@ function statusCursor(status: WalletSyncStatus): string {
   ].join(":");
 }
 
-function snapshotIndexProgress(snapshot: WalletSdkSnapshot): number {
-  return snapshotStateOffset(snapshot.shieldedState) + snapshotStateOffset(snapshot.unshieldedState) + snapshotStateOffset(snapshot.dustState);
-}
-
-function snapshotStateOffset(serialized: string | null | undefined): number {
-  if (!serialized) return 0;
-
-  try {
-    const parsed = JSON.parse(serialized) as { offset?: unknown; appliedId?: unknown };
-    return Number(parsed.offset ?? parsed.appliedId ?? 0);
-  } catch {
-    return 0;
-  }
-}
-
 function syncPercentage(parts: SyncPartStatus[]): number {
   const current = parts.reduce((sum, part) => sum + part.currentIndex, 0);
   const highest = parts.reduce((sum, part) => sum + part.highestIndex, 0);
@@ -708,22 +679,6 @@ function pendingStatus(walletId: string, active: boolean): WalletSyncStatus {
   };
 }
 
-function snapshotPath(wallet: WalletConfig): string {
-  return path.join(walletCacheDir(wallet), "snapshot.json");
-}
-
-function walletCacheDir(wallet: WalletConfig): string {
-  return path.join(sdkDir, safePathSegment(walletCacheAddress(wallet)));
-}
-
-function walletCacheAddress(wallet: WalletConfig): string {
-  return wallet.addresses?.unshielded || wallet.id || "unknown-wallet";
-}
-
-function safePathSegment(value: string): string {
-  return value.replace(/[^a-zA-Z0-9._-]/g, "_");
-}
-
 function readJson<T>(filePath: string, fallback: T): T {
   try {
     return JSON.parse(fs.readFileSync(filePath, "utf8")) as T;
@@ -762,6 +717,44 @@ function defaultConfig(): AppConfig {
     },
     wallets: [],
   };
+}
+
+function activeNetworkWallets(config: AppConfig): WalletConfig[] {
+  return (config.wallets ?? [])
+    .filter((wallet) => (wallet.network ?? "preprod") === config.network)
+    .map((wallet) => canonicalWalletConfig(wallet, config.network));
+}
+
+function canonicalWalletConfig(wallet: WalletConfig, network: MidnightNetwork): WalletConfig {
+  try {
+    const unshieldedAddress = deriveUnshieldedAddress(wallet.phrase, network);
+    return {
+      ...wallet,
+      id: unshieldedAddress,
+      legacyId: wallet.id === unshieldedAddress ? wallet.legacyId : wallet.id,
+      addresses: {
+        ...wallet.addresses,
+        unshielded: unshieldedAddress,
+      },
+    };
+  } catch {
+    return wallet;
+  }
+}
+
+function canonicalActiveWalletId(walletId: string | null, wallets: WalletConfig[]): string | null {
+  if (!walletId) return null;
+  return wallets.find((wallet) => wallet.id === walletId || wallet.legacyId === walletId)?.id ?? walletId;
+}
+
+function removeStaleRootCacheFiles(): void {
+  for (const fileName of ["checkpoint.json", "checkpoints.json"]) {
+    try {
+      fs.rmSync(path.join(syncDir, fileName), { force: true });
+    } catch {
+      // Stale root checkpoints are best-effort cleanup only.
+    }
+  }
 }
 
 function parseArgs(rawArgs: string[]): Record<string, string | undefined> {

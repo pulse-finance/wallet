@@ -12,6 +12,7 @@ export type WalletConfig = {
   id: string;
   name: string;
   phrase: string;
+  network?: MidnightNetwork;
   addresses: WalletAddresses;
 };
 

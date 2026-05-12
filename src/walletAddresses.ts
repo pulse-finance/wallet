@@ -12,7 +12,7 @@ import {
 } from "@midnight-ntwrk/wallet-sdk-address-format";
 import { HDWallet, Roles } from "@midnight-ntwrk/wallet-sdk-hd";
 import { createKeystore } from "@midnight-ntwrk/wallet-sdk-unshielded-wallet";
-import { MidnightNetwork, WalletConfig } from "./types";
+import { MidnightNetwork, WalletAddresses, WalletConfig } from "./types";
 
 export type DerivedAddressField = {
   value: string | null;
@@ -26,6 +26,37 @@ export type DerivedWalletDisplay = {
     dust: DerivedAddressField;
   };
 };
+
+export function deriveWalletAddresses(phrase: string, network: MidnightNetwork): WalletAddresses {
+  const derived = deriveDisplayAddresses(
+    {
+      id: "",
+      name: "",
+      phrase,
+      network,
+      addresses: {
+        unshielded: "",
+        shielded: "",
+        dust: "",
+      },
+    },
+    network,
+  );
+  const unshielded = derived.addresses.unshielded.value;
+  const shielded = derived.addresses.shielded.value;
+  const dust = derived.addresses.dust.value;
+
+  if (!unshielded || !shielded || !dust) {
+    throw new Error(
+      derived.addresses.unshielded.error ??
+        derived.addresses.shielded.error ??
+        derived.addresses.dust.error ??
+        "Failed to derive wallet addresses",
+    );
+  }
+
+  return { unshielded, shielded, dust };
+}
 
 export function deriveDisplayAddresses(wallet: WalletConfig, network: MidnightNetwork): DerivedWalletDisplay {
   if (!globalThis.Buffer) {

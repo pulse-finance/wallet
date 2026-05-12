@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "pnpm build:sidecar && tsc && vite build",
+    "build": "pnpm clean:dist && pnpm build:sidecar && tsc && vite build",
+    "clean:dist": "node scripts/clean-dist.js",
     "build:sidecar": "node scripts/esbuild.js",
     "preview": "vite preview",
     "tauri": "tauri"

@@ -31,6 +31,7 @@ export default defineConfig(async () => ({
     target: tauriTarget,
   },
   build: {
+    outDir: "dist/frontend",
     target: tauriTarget,
     minify: !process.env.TAURI_ENV_DEBUG ? "esbuild" : false,
     sourcemap: !!process.env.TAURI_ENV_DEBUG,

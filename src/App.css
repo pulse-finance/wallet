@@ -43,6 +43,11 @@ button:hover:not(:disabled) {
   background: #202937;
 }
 
+button.secondary {
+  color: #b8c4d6;
+  background: transparent;
+}
+
 button:disabled {
   cursor: not-allowed;
   opacity: 0.56;
@@ -459,6 +464,16 @@ code {
   background: #131923;
 }
 
+.settings-page {
+  display: grid;
+  align-content: start;
+  gap: 18px;
+}
+
+.settings-page .page-header {
+  margin-bottom: 6px;
+}
+
 .settings-form {
   display: grid;
   gap: 16px;
@@ -484,6 +499,45 @@ code {
 .settings-actions {
   display: flex;
   justify-content: flex-end;
+}
+
+.whitelisted-dapp-table {
+  display: grid;
+  overflow: auto;
+}
+
+.whitelisted-dapp-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) 80px;
+  gap: 12px;
+  align-items: center;
+  min-height: 46px;
+  padding: 8px 0;
+  border-bottom: 1px solid #253244;
+}
+
+.whitelisted-dapp-row:last-child {
+  border-bottom: 0;
+}
+
+.whitelisted-dapp-row code {
+  min-width: 0;
+}
+
+.whitelisted-dapp-row button {
+  justify-self: end;
+}
+
+.whitelisted-dapp-head {
+  min-height: 34px;
+  padding-top: 0;
+}
+
+.whitelisted-dapp-head span {
+  color: #9cabbc;
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-transform: uppercase;
 }
 
 .bottom-bar {
@@ -545,6 +599,15 @@ code {
   padding: 0;
 }
 
+.danger-icon-button {
+  color: #ff9aa3;
+}
+
+.danger-icon-button:hover:not(:disabled) {
+  border-color: #7e3844;
+  background: #321821;
+}
+
 .modal input,
 .modal textarea {
   width: 100%;
@@ -563,6 +626,35 @@ code {
 
 .wallet-flow-modal {
   width: min(720px, 100%);
+}
+
+.dapp-approval-modal {
+  width: min(520px, 100%);
+}
+
+.dapp-approval-details {
+  display: grid;
+  gap: 10px;
+  margin: 4px 0;
+}
+
+.dapp-approval-details div {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 12px;
+}
+
+.dapp-approval-details dt {
+  color: #8392a7;
+  font-size: 0.8rem;
+}
+
+.dapp-approval-details dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #e9eef7;
+  font-size: 0.9rem;
 }
 
 .amount-row {
