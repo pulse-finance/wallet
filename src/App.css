@@ -414,7 +414,7 @@ code {
 
 .tx-table-row {
   display: grid;
-  grid-template-columns: minmax(180px, 1.7fr) 110px 110px minmax(180px, 1fr);
+  grid-template-columns: minmax(180px, 1fr) 110px;
   gap: 12px;
   align-items: center;
   min-width: 0;
@@ -430,10 +430,24 @@ code {
   color: #c3cedd;
 }
 
+.tx-transaction-cell {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+}
+
 .tx-link {
   display: inline;
   color: #9ec5ff;
+  font-size: 0.75em;
   text-decoration: none;
+}
+
+.tx-timestamp {
+  color: #8fa0b5;
+  font-size: 0.82rem;
 }
 
 .tx-link:hover {

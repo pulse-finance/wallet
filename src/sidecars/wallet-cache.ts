@@ -58,6 +58,14 @@ type SnapshotFilePlan = {
   value: unknown;
 };
 
+type TransactionMetadataEntry = {
+  hash?: unknown;
+  timestamp?: unknown;
+  blockHeight?: unknown;
+  blockHash?: unknown;
+  contractCalls?: unknown;
+};
+
 const cacheFileNames = {
   shieldedState: "shielded-state.json",
   unshieldedState: "unshielded-state.json",
@@ -161,6 +169,18 @@ export function writeWalletCacheSnapshot(syncDir: string, network: MidnightNetwo
   }
 }
 
+export async function writeWalletTxMetadata(
+  syncDir: string,
+  network: MidnightNetwork,
+  wallet: WalletCacheConfig,
+  txHistoryStorage: TransactionHistoryStorageLike,
+): Promise<void> {
+  const cacheDir = walletCacheDir(syncDir, network, wallet);
+  const filePath = path.join(cacheDir, cacheFileNames.txHistory);
+  const serialized = await txHistoryStorage.serialize();
+  atomicWriteJson(filePath, preserveExistingTransactionMetadata(filePath, parseSerializedJson(serialized)));
+}
+
 export function walletCacheDir(syncDir: string, network: MidnightNetwork, wallet: WalletCacheConfig): string {
   return path.join(syncDir, safePathSegment(deriveUnshieldedAddress(wallet.phrase, network)));
 }
@@ -198,7 +218,7 @@ function snapshotWritePlan(cacheDir: string, snapshot: WalletSdkSnapshot, progre
   addSerializedWrite(writes, path.join(cacheDir, cacheFileNames.shieldedState), snapshot.shieldedState);
   addSerializedWrite(writes, path.join(cacheDir, cacheFileNames.unshieldedState), snapshot.unshieldedState);
   addSerializedWrite(writes, path.join(cacheDir, cacheFileNames.dustState), snapshot.dustState);
-  addSerializedWrite(writes, path.join(cacheDir, cacheFileNames.txHistory), snapshot.txHistory);
+  addTxHistoryWrite(writes, path.join(cacheDir, cacheFileNames.txHistory), snapshot.txHistory);
   writes.push({ path: path.join(cacheDir, cacheFileNames.syncProgress), value: progress });
   return writes;
 }
@@ -206,6 +226,51 @@ function snapshotWritePlan(cacheDir: string, snapshot: WalletSdkSnapshot, progre
 function addSerializedWrite(writes: SnapshotFilePlan[], filePath: string, serialized: string | undefined): void {
   if (!serialized) return;
   writes.push({ path: filePath, value: parseSerializedJson(serialized) });
+}
+
+function addTxHistoryWrite(writes: SnapshotFilePlan[], filePath: string, serialized: string | undefined): void {
+  if (!serialized) return;
+  writes.push({ path: filePath, value: preserveExistingTransactionMetadata(filePath, parseSerializedJson(serialized)) });
+}
+
+function preserveExistingTransactionMetadata(filePath: string, nextValue: unknown): unknown {
+  if (!Array.isArray(nextValue)) {
+    return nextValue;
+  }
+
+  const existingValue = readJson<unknown>(filePath, null);
+  if (!Array.isArray(existingValue)) {
+    return nextValue;
+  }
+
+  const existingByHash = new Map<string, TransactionMetadataEntry>();
+  for (const existingEntry of existingValue) {
+    if (!isTransactionMetadataEntry(existingEntry) || typeof existingEntry.hash !== "string") continue;
+    existingByHash.set(existingEntry.hash, existingEntry);
+  }
+
+  return nextValue.map((nextEntry) => {
+    if (!isTransactionMetadataEntry(nextEntry) || typeof nextEntry.hash !== "string") {
+      return nextEntry;
+    }
+
+    const existingEntry = existingByHash.get(nextEntry.hash);
+    if (!existingEntry) {
+      return nextEntry;
+    }
+
+    return {
+      ...nextEntry,
+      timestamp: nextEntry.timestamp ?? existingEntry.timestamp,
+      blockHeight: nextEntry.blockHeight ?? existingEntry.blockHeight,
+      blockHash: nextEntry.blockHash ?? existingEntry.blockHash,
+      contractCalls: nextEntry.contractCalls ?? existingEntry.contractCalls,
+    };
+  });
+}
+
+function isTransactionMetadataEntry(value: unknown): value is TransactionMetadataEntry {
+  return typeof value === "object" && value !== null;
 }
 
 function findLegacySnapshotSources(syncDir: string, wallet: WalletCacheConfig): string[] {

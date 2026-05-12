@@ -37,7 +37,8 @@ export function WalletDetailPage({ network, wallet, displayAddresses, syncStatus
   const assetsPerPage = Math.max(assetColumns * ASSET_GRID_ROWS, 1);
 
   const assetPageCount = Math.max(1, Math.ceil(assets.length / assetsPerPage));
-  const transactionPageCount = Math.max(1, Math.ceil((syncStatus?.transactionHistory.length ?? 0) / TRANSACTIONS_PER_PAGE));
+  const sortedTransactions = useMemo(() => sortTransactionsNewestFirst(syncStatus?.transactionHistory ?? []), [syncStatus]);
+  const transactionPageCount = Math.max(1, Math.ceil(sortedTransactions.length / TRANSACTIONS_PER_PAGE));
 
   useEffect(() => {
     setAssetPage((current) => Math.min(current, assetPageCount));
@@ -67,7 +68,7 @@ export function WalletDetailPage({ network, wallet, displayAddresses, syncStatus
   }, []);
 
   const visibleAssets = assets.slice((assetPage - 1) * assetsPerPage, assetPage * assetsPerPage);
-  const visibleTransactions = (syncStatus?.transactionHistory ?? []).slice(
+  const visibleTransactions = sortedTransactions.slice(
     (transactionPage - 1) * TRANSACTIONS_PER_PAGE,
     transactionPage * TRANSACTIONS_PER_PAGE,
   );
@@ -288,29 +289,62 @@ function TransactionTable({
       <div className="tx-table-row tx-table-head">
         <span>Transaction</span>
         <span>Network</span>
-        <span>Status</span>
-        <span>Timestamp</span>
       </div>
       {transactions.map((transaction) => (
         <div key={transaction.hash} className="tx-table-row">
-          <a
-            className="tx-link"
-            href={getExplorerTransactionUrl(network, transaction.hash)}
-            onClick={(event) => {
-              event.preventDefault();
-              void openTransactionInExplorer(network, transaction.hash);
-            }}
-            title={transaction.hash}
-          >
-            <code>{shortenHash(transaction.hash)}</code>
-          </a>
+          <div className="tx-transaction-cell">
+            <a
+              className="tx-link"
+              href={getExplorerTransactionUrl(network, transaction.hash)}
+              onClick={(event) => {
+                event.preventDefault();
+                void openTransactionInExplorer(network, transaction.hash);
+              }}
+              title={transaction.hash}
+            >
+              <code>{shortenHash(transaction.hash)}</code>
+            </a>
+            <span className="tx-timestamp">{formatTransactionTimestamp(transaction.timestamp)}</span>
+          </div>
           <span>Midnight</span>
-          <span>{transaction.status}</span>
-          <span>{transaction.timestamp ?? "Unknown time"}</span>
         </div>
       ))}
     </div>
   );
+}
+
+function sortTransactionsNewestFirst(transactions: WalletTransaction[]): WalletTransaction[] {
+  return [...transactions].sort((left, right) => transactionTimestampMs(right) - transactionTimestampMs(left));
+}
+
+function transactionTimestampMs(transaction: WalletTransaction): number {
+  if (!transaction.timestamp) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  const timestampMs = new Date(transaction.timestamp).getTime();
+  return Number.isNaN(timestampMs) ? Number.NEGATIVE_INFINITY : timestampMs;
+}
+
+function formatTransactionTimestamp(timestamp: string | null): string {
+  if (!timestamp) {
+    return "Unknown time";
+  }
+
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) {
+    return timestamp;
+  }
+
+  return new Intl.DateTimeFormat("sv-SE", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
 }
 
 function buildWalletAssets(syncStatus: WalletSyncStatus | null): WalletAsset[] {

@@ -5,13 +5,13 @@ import { webcrypto } from "node:crypto";
 import { Buffer } from "buffer";
 import { mnemonicToSeedSync } from "@scure/bip39";
 import * as ledger from "@midnight-ntwrk/ledger-v8";
+import { Console, Effect } from "effect";
 import {
   DustAddress,
   DustWallet,
   HDWallet,
   InMemoryTransactionHistoryStorage,
   mainnet,
-  mergeWalletEntries,
   MidnightBech32m,
   PublicKey,
   Roles,
@@ -22,7 +22,6 @@ import {
   UnshieldedAddress,
   UnshieldedWallet,
   validateMnemonic,
-  WalletEntrySchema,
   WalletFacade,
   createKeystore,
   type FacadeState,
@@ -32,6 +31,10 @@ import {
   migrateWalletCache,
   readWalletCache,
 } from "./wallet-cache.js";
+import {
+  EnrichedWalletEntrySchema,
+  mergeEnrichedWalletEntries,
+} from "./tx-metadata.js";
 
 if (!globalThis.Buffer) {
   globalThis.Buffer = Buffer;
@@ -170,66 +173,78 @@ async function shutdown(code: number): Promise<void> {
 }
 
 async function handleRequest(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
-  try {
-    if (!isAuthorized(request)) {
-      writeJson(response, 401, { error: "Unauthorized" });
-      return;
-    }
+  await Effect.runPromise(handleRequestProgram(request, response));
+}
 
-    const url = new URL(request.url ?? "/", "http://127.0.0.1");
-    if (!url.pathname.startsWith("/internal/midnight")) {
+function handleRequestProgram(request: http.IncomingMessage, response: http.ServerResponse): Effect.Effect<void> {
+  return Effect.tryPromise({
+    try: async () => {
+      if (!isAuthorized(request)) {
+        writeJson(response, 401, { error: "Unauthorized" });
+        return;
+      }
+
+      const url = new URL(request.url ?? "/", "http://127.0.0.1");
+      if (!url.pathname.startsWith("/internal/midnight")) {
+        writeJson(response, 404, { error: "Not found" });
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/internal/midnight/configuration") {
+        const config = readJson<AppConfig>(configPath, defaultConfig());
+        writeJson(response, 200, {
+          indexerUri: config.endpoints.indexerUrl,
+          indexerWsUri: config.endpoints.indexerWsUrl,
+          substrateNodeUri: config.endpoints.nodeUrl,
+          proverServerUri: "http://127.0.0.1:6300",
+          networkId: config.network,
+        });
+        return;
+      }
+
+      const current = await ensureRuntime();
+
+      if (request.method === "GET" && url.pathname === "/internal/midnight/addresses") {
+        writeJson(response, 200, deriveAddresses(current));
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/internal/midnight/balance") {
+        writeJson(response, 200, await readBalances(current));
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/internal/midnight/balance") {
+        const body = await readRequestJson<BalanceRequest>(request);
+        const tx = requiredString(body.tx, "tx");
+        const kind = parseBalanceKind(body.kind);
+        const tokenKindsToBalance = parseTokenKindsToBalance(body.options);
+        const balancedTx = await balanceTransaction(current, tx, kind, tokenKindsToBalance);
+        writeJson(response, 200, { tx: balancedTx });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/internal/midnight/submit") {
+        const body = await readRequestJson<SubmitRequest>(request);
+        const tx = deserializeFinalizedTransaction(requiredString(body.tx, "tx"));
+        await current.facade.waitForSyncedState();
+        const txId = await current.facade.submitTransaction(tx);
+        writeJson(response, 200, { ok: true, txId: txId ?? null, txHash: String(tx.transactionHash()) });
+        return;
+      }
+
       writeJson(response, 404, { error: "Not found" });
-      return;
-    }
-
-    if (request.method === "GET" && url.pathname === "/internal/midnight/configuration") {
-      const config = readJson<AppConfig>(configPath, defaultConfig());
-      writeJson(response, 200, {
-        indexerUri: config.endpoints.indexerUrl,
-        indexerWsUri: config.endpoints.indexerWsUrl,
-        substrateNodeUri: config.endpoints.nodeUrl,
-        proverServerUri: "http://127.0.0.1:6300",
-        networkId: config.network,
-      });
-      return;
-    }
-
-    const current = await ensureRuntime();
-
-    if (request.method === "GET" && url.pathname === "/internal/midnight/addresses") {
-      writeJson(response, 200, deriveAddresses(current));
-      return;
-    }
-
-    if (request.method === "GET" && url.pathname === "/internal/midnight/balance") {
-      writeJson(response, 200, await readBalances(current));
-      return;
-    }
-
-    if (request.method === "POST" && url.pathname === "/internal/midnight/balance") {
-      const body = await readRequestJson<BalanceRequest>(request);
-      const tx = requiredString(body.tx, "tx");
-      const kind = parseBalanceKind(body.kind);
-      const tokenKindsToBalance = parseTokenKindsToBalance(body.options);
-      const balancedTx = await balanceTransaction(current, tx, kind, tokenKindsToBalance);
-      writeJson(response, 200, { tx: balancedTx });
-      return;
-    }
-
-    if (request.method === "POST" && url.pathname === "/internal/midnight/submit") {
-      const body = await readRequestJson<SubmitRequest>(request);
-      const tx = deserializeFinalizedTransaction(requiredString(body.tx, "tx"));
-      await current.facade.waitForSyncedState();
-      const txId = await current.facade.submitTransaction(tx);
-      writeJson(response, 200, { ok: true, txId: txId ?? null, txHash: String(tx.transactionHash()) });
-      return;
-    }
-
-    writeJson(response, 404, { error: "Not found" });
-  } catch (caught) {
-    const status = caught instanceof HttpError ? caught.status : 500;
-    writeJson(response, status, { error: formatError(caught) });
-  }
+    },
+    catch: (caught) => caught,
+  }).pipe(
+    Effect.tapError((error) => Console.log(`[dapp-connector] Error: ${(error as Error).message}`)),
+    Effect.catchAll((caught) =>
+      Effect.sync(() => {
+        const status = caught instanceof HttpError ? caught.status : 500;
+        writeJson(response, status, { error: formatError(caught) });
+      }),
+    ),
+  );
 }
 
 async function ensureRuntime(): Promise<Runtime> {
@@ -294,8 +309,8 @@ async function startRuntime(config: AppConfig, wallet: WalletConfig, signature: 
   const dustSecretKey = ledger.DustSecretKey.fromSeed(derivationResult.keys[Roles.Dust]);
   const unshieldedKeystore = createKeystore(derivationResult.keys[Roles.NightExternal], networkId);
   const txHistoryStorage = snapshot?.txHistory
-    ? InMemoryTransactionHistoryStorage.restore(snapshot.txHistory, WalletEntrySchema, mergeWalletEntries)
-    : new InMemoryTransactionHistoryStorage(WalletEntrySchema, mergeWalletEntries);
+    ? InMemoryTransactionHistoryStorage.restore(snapshot.txHistory, EnrichedWalletEntrySchema, mergeEnrichedWalletEntries)
+    : new InMemoryTransactionHistoryStorage(EnrichedWalletEntrySchema, mergeEnrichedWalletEntries);
 
   const sdkConfig = {
     networkId,

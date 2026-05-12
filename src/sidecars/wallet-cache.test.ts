@@ -8,6 +8,7 @@ import {
   readWalletCache,
   walletCacheDir,
   writeWalletCacheSnapshot,
+  writeWalletTxMetadata,
   type WalletCacheConfig,
 } from "./wallet-cache.js";
 
@@ -72,6 +73,102 @@ test("does not overwrite existing split cache files during migration", async () 
   assert.deepEqual(readJson(path.join(cacheDir, "shielded-state.json")), { offset: 99 });
   assert.deepEqual(readJson(path.join(cacheDir, "unshielded-state.json")), { appliedId: 98 });
   assert.equal(fs.existsSync(legacyPath), false);
+});
+
+test("preserves existing enriched transaction metadata during snapshot writes", async () => {
+  const syncDir = tempSyncDir();
+  const cacheDir = walletCacheDir(syncDir, "preprod", wallet);
+  writeJson(path.join(cacheDir, "tx-metadata.json"), [
+    {
+      hash: "abc",
+      timestamp: "2026-01-01T00:00:00.000Z",
+      blockHeight: 123,
+      blockHash: "block",
+      contractCalls: [{ address: "contract", circuitName: "transfer" }],
+    },
+  ]);
+
+  writeWalletCacheSnapshot(syncDir, "preprod", wallet, {
+    walletId: wallet.id,
+    unshieldedAddress: "existing",
+    completedFullSync: true,
+    shieldedState: JSON.stringify({ offset: 99 }),
+    unshieldedState: JSON.stringify({ appliedId: 98 }),
+    dustState: JSON.stringify({ offset: 97 }),
+    txHistory: JSON.stringify([
+      {
+        hash: "abc",
+        protocolVersion: 1,
+        status: "SUCCESS",
+        identifiers: [],
+      },
+    ]),
+  });
+
+  assert.deepEqual(readJson(path.join(cacheDir, "tx-metadata.json")), [
+    {
+      hash: "abc",
+      protocolVersion: 1,
+      status: "SUCCESS",
+      identifiers: [],
+      timestamp: "2026-01-01T00:00:00.000Z",
+      blockHeight: 123,
+      blockHash: "block",
+      contractCalls: [{ address: "contract", circuitName: "transfer" }],
+    },
+  ]);
+});
+
+test("preserves existing enriched transaction metadata during direct metadata writes", async () => {
+  const syncDir = tempSyncDir();
+  const cacheDir = walletCacheDir(syncDir, "preprod", wallet);
+  writeJson(path.join(cacheDir, "tx-metadata.json"), [
+    {
+      hash: "abc",
+      timestamp: "2026-01-01T00:00:00.000Z",
+      blockHeight: 123,
+      blockHash: "block",
+      contractCalls: [{ address: "contract", circuitName: "transfer" }],
+    },
+  ]);
+
+  await writeWalletTxMetadata(syncDir, "preprod", wallet, {
+    async serialize() {
+      return JSON.stringify([
+        {
+          hash: "abc",
+          protocolVersion: 1,
+          status: "SUCCESS",
+          identifiers: [],
+        },
+        {
+          hash: "new",
+          protocolVersion: 1,
+          status: "SUCCESS",
+          identifiers: [],
+        },
+      ]);
+    },
+  });
+
+  assert.deepEqual(readJson(path.join(cacheDir, "tx-metadata.json")), [
+    {
+      hash: "abc",
+      protocolVersion: 1,
+      status: "SUCCESS",
+      identifiers: [],
+      timestamp: "2026-01-01T00:00:00.000Z",
+      blockHeight: 123,
+      blockHash: "block",
+      contractCalls: [{ address: "contract", circuitName: "transfer" }],
+    },
+    {
+      hash: "new",
+      protocolVersion: 1,
+      status: "SUCCESS",
+      identifiers: [],
+    },
+  ]);
 });
 
 test("keeps legacy source when split writes cannot be prepared", async () => {

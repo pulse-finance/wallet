@@ -9,16 +9,13 @@ import {
   DustWallet,
   HDWallet,
   InMemoryTransactionHistoryStorage,
-  mergeWalletEntries,
   PublicKey,
   Roles,
   ShieldedWallet,
   UnshieldedWallet,
   validateMnemonic,
-  WalletEntrySchema,
   WalletFacade,
   type FacadeState,
-  type WalletEntry,
 } from "@midnight-ntwrk/wallet-sdk";
 import {
   deriveUnshieldedAddress,
@@ -27,8 +24,15 @@ import {
   snapshotFromState,
   snapshotIndexProgress,
   writeWalletCacheSnapshot,
+  writeWalletTxMetadata,
   type WalletSdkSnapshot,
 } from "./wallet-cache.js";
+import {
+  enrichTransactionMetadata,
+  EnrichedWalletEntrySchema,
+  mergeEnrichedWalletEntries,
+  type EnrichedWalletEntry,
+} from "./tx-metadata.js";
 
 if (!globalThis.Buffer) {
   globalThis.Buffer = Buffer;
@@ -158,6 +162,12 @@ type SnapshotWriter = {
   shouldSave(state: FacadeState): boolean;
   schedule(snapshot: WalletSdkSnapshot): Promise<void>;
   flush(): Promise<void>;
+};
+
+type TransactionHistoryStorageWithMetadata = {
+  serialize(): Promise<string>;
+  getAll(): Promise<readonly EnrichedWalletEntry[]>;
+  upsert(entry: EnrichedWalletEntry): Promise<void>;
 };
 
 const args = parseArgs(process.argv.slice(2));
@@ -367,8 +377,21 @@ async function startWalletSync({ config, wallet, active, onStatus }: StartWallet
   const dustSecretKey = ledger.DustSecretKey.fromSeed(derivationResult.keys[Roles.Dust]);
   const unshieldedKeystore = createKeystore(derivationResult.keys[Roles.NightExternal], networkId);
   const txHistoryStorage = snapshot?.txHistory
-    ? InMemoryTransactionHistoryStorage.restore(snapshot.txHistory, WalletEntrySchema, mergeWalletEntries)
-    : new InMemoryTransactionHistoryStorage(WalletEntrySchema, mergeWalletEntries);
+    ? InMemoryTransactionHistoryStorage.restore(snapshot.txHistory, EnrichedWalletEntrySchema, mergeEnrichedWalletEntries)
+    : new InMemoryTransactionHistoryStorage(EnrichedWalletEntrySchema, mergeEnrichedWalletEntries);
+  let completedFullSync = snapshot?.completedFullSync === true;
+  let metadataEnrichmentInFlight = false;
+  function triggerMetadataEnrichment(): void {
+    if (metadataEnrichmentInFlight) return;
+    metadataEnrichmentInFlight = true;
+    void enrichCompletedTransactionMetadata(config, wallet, txHistoryStorage).finally(() => {
+      metadataEnrichmentInFlight = false;
+    });
+  }
+
+  if (completedFullSync) {
+    triggerMetadataEnrichment();
+  }
 
   const sdkConfig = {
     networkId,
@@ -405,15 +428,16 @@ async function startWalletSync({ config, wallet, active, onStatus }: StartWallet
         : DustWallet(configuration).startWithSecretKey(dustSecretKey, ledger.LedgerParameters.initialParameters().dust),
   });
 
+  const writeMetadata = () => writeWalletTxMetadata(syncDir, config.network, wallet, txHistoryStorage);
   const snapshotSaver = createSyncProgressSnapshotSaver(config, wallet);
-  const statusPublisher = createStatusPublisher(wallet.id, active, facade);
-  let completedFullSync = snapshot?.completedFullSync === true;
+  const statusPublisher = createStatusPublisher(wallet.id, active, facade, writeMetadata);
   const subscription = facade.state().subscribe({
     next: (state: FacadeState) => {
       void (async () => {
         const status = await statusPublisher.statusFromState(state);
         if (status.synced) {
           completedFullSync = true;
+          triggerMetadataEnrichment();
         }
         if (statusPublisher.shouldPublish(status)) {
           onStatus(status);
@@ -440,6 +464,24 @@ async function startWalletSync({ config, wallet, active, onStatus }: StartWallet
       await facade.stop();
     },
   };
+}
+
+async function enrichCompletedTransactionMetadata(
+  config: AppConfig,
+  wallet: WalletConfig,
+  txHistoryStorage: TransactionHistoryStorageWithMetadata,
+): Promise<void> {
+  try {
+    const writeMetadata = () => writeWalletTxMetadata(syncDir, config.network, wallet, txHistoryStorage);
+    const updated = await enrichTransactionMetadata(wallet.id, config.endpoints, txHistoryStorage, {
+      onUpdate: writeMetadata,
+    });
+    if (updated) {
+      await writeMetadata();
+    }
+  } catch (caught) {
+    console.error(`[wallet-sync:${wallet.id}] failed to enrich tx metadata`, caught);
+  }
 }
 
 async function statusFromFacadeState(
@@ -471,7 +513,12 @@ async function statusFromFacadeState(
   };
 }
 
-function createStatusPublisher(walletId: string, active: boolean, facade: WalletFacadeInstance) {
+function createStatusPublisher(
+  walletId: string,
+  active: boolean,
+  facade: WalletFacadeInstance,
+  onTransactionHistoryRefresh: () => Promise<void>,
+) {
   let lastPublishedAt = 0;
   let lastPublishedCursor: string | null = null;
   let lastHistoryRefreshAt = 0;
@@ -480,8 +527,13 @@ function createStatusPublisher(walletId: string, active: boolean, facade: Wallet
   return {
     async statusFromState(state: FacadeState): Promise<WalletSyncStatus> {
       const now = Date.now();
-      if (state.isSynced || now - lastHistoryRefreshAt >= TX_HISTORY_REFRESH_INTERVAL_MS) {
+      if (now - lastHistoryRefreshAt >= TX_HISTORY_REFRESH_INTERVAL_MS) {
         transactionHistory = (await facade.getAllFromTxHistory()).map(toWalletTransaction);
+        try {
+          await onTransactionHistoryRefresh();
+        } catch (caught) {
+          console.error(`[wallet-sync:${walletId}] failed to save tx metadata`, caught);
+        }
         lastHistoryRefreshAt = now;
       }
 
@@ -650,7 +702,7 @@ function balancesToAssets(balances: Record<string, unknown>): AssetBalance[] {
   }));
 }
 
-function toWalletTransaction(entry: WalletEntry): WalletTransaction {
+function toWalletTransaction(entry: EnrichedWalletEntry): WalletTransaction {
   return {
     hash: String(entry.hash),
     status: String(entry.status),
