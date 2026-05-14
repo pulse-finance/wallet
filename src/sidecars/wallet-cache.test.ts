@@ -6,11 +6,13 @@ import test from "node:test";
 import {
   migrateWalletCache,
   readWalletCache,
+  snapshotFromState,
   walletCacheDir,
   writeWalletCacheSnapshot,
   writeWalletTxMetadata,
   type WalletCacheConfig,
 } from "./wallet-cache.js";
+import type { FacadeState } from "@midnight-ntwrk/wallet-sdk";
 
 const wallet: WalletCacheConfig = {
   id: "wallet-one",
@@ -117,6 +119,45 @@ test("preserves existing enriched transaction metadata during snapshot writes", 
       contractCalls: [{ address: "contract", circuitName: "transfer" }],
     },
   ]);
+});
+
+test("snapshotFromState stores transaction history as serialized JSON", async () => {
+  const snapshot = await snapshotFromState(
+    "preprod",
+    wallet,
+    {
+      async getAllFromTxHistory() {
+        return [
+          {
+            hash: "abc",
+            protocolVersion: 1,
+            status: "SUCCESS",
+            identifiers: [],
+            fees: 1n,
+          },
+        ];
+      },
+    },
+    {
+      isSynced: true,
+      shielded: { serialize: () => JSON.stringify({ offset: 11, highestIndex: 20 }) },
+      unshielded: { serialize: () => JSON.stringify({ appliedId: 7, highestTransactionId: 9 }) },
+      dust: { serialize: () => JSON.stringify({ offset: 3 }) },
+    } as unknown as FacadeState,
+  );
+
+  assert.equal(
+    snapshot.txHistory,
+    JSON.stringify([
+      {
+        hash: "abc",
+        protocolVersion: 1,
+        status: "SUCCESS",
+        identifiers: [],
+        fees: "1",
+      },
+    ]),
+  );
 });
 
 test("preserves existing enriched transaction metadata during direct metadata writes", async () => {

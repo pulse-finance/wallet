@@ -5,11 +5,17 @@ import { mnemonicToSeedSync } from "@scure/bip39";
 import {
   createKeystore,
   HDWallet,
+  InMemoryTransactionHistoryStorage,
   mainnet,
   Roles,
   UnshieldedAddress,
   type FacadeState,
+  type WalletFacade,
 } from "@midnight-ntwrk/wallet-sdk";
+import {
+  EnrichedWalletEntrySchema,
+  mergeEnrichedWalletEntries,
+} from "./tx-metadata.js";
 
 export type MidnightNetwork = "preprod" | "mainnet" | string;
 
@@ -37,6 +43,8 @@ export type WalletSdkSnapshot = {
 export type TransactionHistoryStorageLike = {
   serialize(): Promise<string>;
 };
+
+type WalletFacadeTxHistory = Pick<WalletFacade, "getAllFromTxHistory">;
 
 type SyncPartStatus = {
   currentIndex: number;
@@ -134,15 +142,27 @@ export function readWalletCache(syncDir: string, network: MidnightNetwork, walle
   };
 }
 
+export async function dumpTxHistorySummary(wallet: WalletFacadeTxHistory): Promise<void> {
+const txHistoryEntries = await wallet.getAllFromTxHistory()
+
+  console.log(`Timestamp missing from txs: ${txHistoryEntries.filter(entry => !entry.timestamp).map(entry => entry.hash)}`)
+  console.log(`Latest tx timestamp ${txHistoryEntries.sort((a, b) => new Date(b.timestamp ?? 0).getTime() - new Date(a.timestamp ?? 0).getTime())[0].timestamp}`)
+}
+
 export async function snapshotFromState(
   network: MidnightNetwork,
   wallet: WalletCacheConfig,
-  state: FacadeState,
-  txHistoryStorage: TransactionHistoryStorageLike,
+  facade: WalletFacadeTxHistory,
+  state: FacadeState
 ): Promise<WalletSdkSnapshot> {
   const shieldedState = state.shielded.serialize();
   const unshieldedState = state.unshielded.serialize();
   const dustState = state.dust.serialize();
+
+  const txHistoryEntries = await facade.getAllFromTxHistory()
+  const txHistory = await serializeTransactionHistoryEntries(txHistoryEntries);
+
+  await dumpTxHistorySummary(facade)
 
   return {
     walletId: wallet.id,
@@ -151,7 +171,7 @@ export async function snapshotFromState(
     shieldedState,
     unshieldedState,
     dustState,
-    txHistory: await txHistoryStorage.serialize(),
+    txHistory,
     syncProgress: {
       completedFullSync: state.isSynced,
       updatedAtMs: Date.now(),
@@ -160,6 +180,14 @@ export async function snapshotFromState(
       dust: syncPartFromSerializedState(dustState),
     },
   };
+}
+
+async function serializeTransactionHistoryEntries(entries: Awaited<ReturnType<WalletFacadeTxHistory["getAllFromTxHistory"]>>): Promise<string> {
+  const storage = new InMemoryTransactionHistoryStorage(EnrichedWalletEntrySchema, mergeEnrichedWalletEntries);
+  for (const entry of entries) {
+    await storage.upsert(entry);
+  }
+  return storage.serialize();
 }
 
 export function writeWalletCacheSnapshot(syncDir: string, network: MidnightNetwork, wallet: WalletCacheConfig, snapshot: WalletSdkSnapshot): void {

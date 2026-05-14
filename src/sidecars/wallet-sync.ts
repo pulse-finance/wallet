@@ -19,6 +19,7 @@ import {
 } from "@midnight-ntwrk/wallet-sdk";
 import {
   deriveUnshieldedAddress,
+  dumpTxHistorySummary,
   migrateWalletCache,
   readWalletCache,
   snapshotFromState,
@@ -431,8 +432,32 @@ async function startWalletSync({ config, wallet, active, onStatus }: StartWallet
   const writeMetadata = () => writeWalletTxMetadata(syncDir, config.network, wallet, txHistoryStorage);
   const snapshotSaver = createSyncProgressSnapshotSaver(config, wallet);
   const statusPublisher = createStatusPublisher(wallet.id, active, facade, writeMetadata);
+  let latestState: FacadeState | null = null;
+  let historyRefreshInFlight = false;
+
+  async function refreshTransactionHistoryStatus(): Promise<void> {
+    if (historyRefreshInFlight || !latestState) return;
+    historyRefreshInFlight = true;
+    try {
+      const status = await statusPublisher.statusFromState(latestState);
+      if (statusPublisher.shouldPublish(status)) {
+        onStatus(status);
+      }
+    } finally {
+      historyRefreshInFlight = false;
+    }
+  }
+
+  const txHistoryTimer = setInterval(() => {
+
+    void refreshTransactionHistoryStatus().catch((caught) => {
+      console.error(`[wallet-sync:${wallet.id}] failed to refresh tx history`, caught);
+    }).then(() => console.log("Updated tx history"));
+  }, TX_HISTORY_REFRESH_INTERVAL_MS);
+
   const subscription = facade.state().subscribe({
     next: (state: FacadeState) => {
+      latestState = state;
       void (async () => {
         const status = await statusPublisher.statusFromState(state);
         if (status.synced) {
@@ -443,7 +468,7 @@ async function startWalletSync({ config, wallet, active, onStatus }: StartWallet
           onStatus(status);
         }
         if (snapshotSaver.shouldSave(state)) {
-          await snapshotSaver.schedule(await snapshotFromState(config.network, wallet, state, txHistoryStorage));
+          await snapshotSaver.schedule(await snapshotFromState(config.network, wallet, facade, state));
         }
       })();
     },
@@ -454,11 +479,16 @@ async function startWalletSync({ config, wallet, active, onStatus }: StartWallet
 
   await facade.start(shieldedSecretKeys, dustSecretKey);
 
+  await facade.waitForSyncedState()
+  console.log("Sync complete")
+  await dumpTxHistorySummary(facade)
+
   return {
     hasCompletedFullSync(): boolean {
       return completedFullSync;
     },
     async stop(): Promise<void> {
+      clearInterval(txHistoryTimer);
       subscription.unsubscribe();
       await snapshotSaver.flush();
       await facade.stop();

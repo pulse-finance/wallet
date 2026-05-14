@@ -30,6 +30,11 @@
         "bundleMediaFramework": true
       }
     },
+    "resources": {
+      "../dist/sidecars/*.mjs": "sidecars",
+      "../dist/sidecars/*.wasm": "sidecars",
+      "resources/node/win-x64": "node/win-x64"
+    },
     "externalBin": ["binaries/midnight-proof-server"],
     "icon": [
       "icons/32x32.png",

@@ -205,16 +205,29 @@ impl WalletSyncSupervisor {
                 return;
             }
         };
-        let script_path = wallet_sync_script_path();
-        let repo_root = repo_root_path();
+        let node_path = match node_runtime_path(app) {
+            Ok(path) => path,
+            Err(error) => {
+                self.last_error = Some(error);
+                return;
+            }
+        };
+        let script_path = match wallet_sync_script_path(app) {
+            Ok(path) => path,
+            Err(error) => {
+                self.last_error = Some(error);
+                return;
+            }
+        };
+        let working_dir = sidecar_working_dir(&script_path);
 
-        match StdCommand::new("node")
+        match StdCommand::new(&node_path)
             .arg(&script_path)
             .arg("--config")
             .arg(&config_path)
             .arg("--cache-dir")
             .arg(&cache_dir)
-            .current_dir(repo_root)
+            .current_dir(working_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -286,13 +299,17 @@ impl DappConnectorSupervisor {
         self.token = None;
 
         let config_path = config_path(app)?;
-        let cache_dir = app.path().app_cache_dir().map_err(|error| error.to_string())?;
-        let script_path = dapp_connector_script_path();
-        let repo_root = repo_root_path();
+        let cache_dir = app
+            .path()
+            .app_cache_dir()
+            .map_err(|error| error.to_string())?;
+        let node_path = node_runtime_path(app)?;
+        let script_path = dapp_connector_script_path(app)?;
+        let working_dir = sidecar_working_dir(&script_path);
         let port = choose_dapp_connector_port()?;
         let token = dapp_connector_token(port);
 
-        match StdCommand::new("node")
+        match StdCommand::new(&node_path)
             .arg(&script_path)
             .arg("--config")
             .arg(&config_path)
@@ -302,7 +319,7 @@ impl DappConnectorSupervisor {
             .arg(port.to_string())
             .arg("--token")
             .arg(&token)
-            .current_dir(repo_root)
+            .current_dir(working_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -511,7 +528,9 @@ fn add_wallet(
         .iter()
         .any(|wallet| wallet.network == request.network && wallet.id == id)
     {
-        return Err("A wallet with this unshielded address already exists for this network".to_string());
+        return Err(
+            "A wallet with this unshielded address already exists for this network".to_string(),
+        );
     }
     let wallet_number = config
         .wallets
@@ -726,18 +745,60 @@ fn repo_root_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
 }
 
-fn wallet_sync_script_path() -> PathBuf {
-    repo_root_path()
-        .join("dist")
-        .join("sidecars")
-        .join("wallet-sync.mjs")
+fn node_runtime_path(app: &AppHandle) -> Result<PathBuf, String> {
+    #[cfg(all(windows, not(debug_assertions)))]
+    {
+        return app
+            .path()
+            .resolve(
+                "node/win-x64/node.exe",
+                tauri::path::BaseDirectory::Resource,
+            )
+            .map_err(|error| error.to_string());
+    }
+
+    #[cfg(not(all(windows, not(debug_assertions))))]
+    {
+        let _ = app;
+        Ok(PathBuf::from("node"))
+    }
 }
 
-fn dapp_connector_script_path() -> PathBuf {
-    repo_root_path()
-        .join("dist")
-        .join("sidecars")
-        .join("dapp-connector.mjs")
+fn wallet_sync_script_path(app: &AppHandle) -> Result<PathBuf, String> {
+    sidecar_script_path(app, "wallet-sync.mjs")
+}
+
+fn dapp_connector_script_path(app: &AppHandle) -> Result<PathBuf, String> {
+    sidecar_script_path(app, "dapp-connector.mjs")
+}
+
+fn sidecar_script_path(app: &AppHandle, filename: &str) -> Result<PathBuf, String> {
+    #[cfg(not(debug_assertions))]
+    {
+        return app
+            .path()
+            .resolve(
+                format!("sidecars/{filename}"),
+                tauri::path::BaseDirectory::Resource,
+            )
+            .map_err(|error| error.to_string());
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        let _ = app;
+        Ok(repo_root_path()
+            .join("dist")
+            .join("sidecars")
+            .join(filename))
+    }
+}
+
+fn sidecar_working_dir(script_path: &PathBuf) -> PathBuf {
+    script_path
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(repo_root_path)
 }
 
 fn choose_dapp_connector_port() -> Result<u16, String> {
@@ -925,13 +986,14 @@ enum MissingContentLength {
 
 fn start_dapp_connector_server(app: AppHandle, state: Arc<AppState>) {
     thread::spawn(move || {
-        let listener = match TcpListener::bind((DAPP_CONNECTOR_PUBLIC_HOST, DAPP_CONNECTOR_PUBLIC_PORT)) {
-            Ok(listener) => listener,
-            Err(error) => {
-                eprintln!("[dapp-connector] failed to bind: {error}");
-                return;
-            }
-        };
+        let listener =
+            match TcpListener::bind((DAPP_CONNECTOR_PUBLIC_HOST, DAPP_CONNECTOR_PUBLIC_PORT)) {
+                Ok(listener) => listener,
+                Err(error) => {
+                    eprintln!("[dapp-connector] failed to bind: {error}");
+                    return;
+                }
+            };
 
         println!(
             "[dapp-connector] listening on http://{DAPP_CONNECTOR_PUBLIC_HOST}:{DAPP_CONNECTOR_PUBLIC_PORT}"
@@ -967,7 +1029,14 @@ fn handle_dapp_connector_stream(mut stream: TcpStream, app: AppHandle, state: Ar
 
     let origin = request.headers.get("origin").cloned();
     if request.method == "OPTIONS" {
-        let _ = write_public_response(&mut stream, 204, "No Content", origin.as_deref(), "text/plain", &[]);
+        let _ = write_public_response(
+            &mut stream,
+            204,
+            "No Content",
+            origin.as_deref(),
+            "text/plain",
+            &[],
+        );
         return;
     }
 
@@ -1080,8 +1149,7 @@ fn ensure_dapp_identity_approved(
         .lock()
         .map_err(|error| (500, error.to_string()))?;
     approvals.insert(identity.to_string());
-    save_dapp_approvals(&state.dapp_approvals_path, &approvals)
-        .map_err(|error| (500, error))?;
+    save_dapp_approvals(&state.dapp_approvals_path, &approvals).map_err(|error| (500, error))?;
     Ok(())
 }
 
@@ -1145,7 +1213,12 @@ fn active_wallet_context(state: &Arc<AppState>) -> (Option<String>, Option<Midni
                 .iter()
                 .find(|wallet| wallet.network == config.network && wallet.id == wallet_id)
         })
-        .or_else(|| config.wallets.iter().find(|wallet| wallet.network == config.network))
+        .or_else(|| {
+            config
+                .wallets
+                .iter()
+                .find(|wallet| wallet.network == config.network)
+        })
         .map(|wallet| wallet.name.clone());
     (wallet_name, Some(config.network))
 }
@@ -1211,7 +1284,9 @@ fn read_http_request(stream: &mut TcpStream) -> Result<DappHttpRequest, String> 
     let header_end = find_header_end(&raw).ok_or_else(|| "Malformed HTTP request".to_string())?;
     let headers_text = String::from_utf8_lossy(&raw[..header_end]);
     let mut lines = headers_text.split("\r\n");
-    let request_line = lines.next().ok_or_else(|| "Missing request line".to_string())?;
+    let request_line = lines
+        .next()
+        .ok_or_else(|| "Missing request line".to_string())?;
     let mut request_parts = request_line.split_whitespace();
     let method = request_parts
         .next()
@@ -1236,7 +1311,9 @@ fn read_http_response(stream: &mut TcpStream) -> Result<DappHttpResponse, String
     let header_end = find_header_end(&raw).ok_or_else(|| "Malformed HTTP response".to_string())?;
     let headers_text = String::from_utf8_lossy(&raw[..header_end]);
     let mut lines = headers_text.split("\r\n");
-    let status_line = lines.next().ok_or_else(|| "Missing status line".to_string())?;
+    let status_line = lines
+        .next()
+        .ok_or_else(|| "Missing status line".to_string())?;
     let status = status_line
         .split_whitespace()
         .nth(1)
@@ -1271,7 +1348,9 @@ fn read_http_message(
     let mut raw = Vec::new();
     let mut buffer = [0_u8; 8192];
     loop {
-        let count = stream.read(&mut buffer).map_err(|error| error.to_string())?;
+        let count = stream
+            .read(&mut buffer)
+            .map_err(|error| error.to_string())?;
         if count == 0 {
             break;
         }
